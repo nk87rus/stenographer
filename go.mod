@@ -8,6 +8,7 @@ require (
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
+	github.com/nbonaparte/audiotags v0.0.0-20200511083502-4bba61f2b949
 	github.com/pressly/goose/v3 v3.27.0
 	github.com/rs/zerolog v1.35.0
 	github.com/stretchr/testify v1.11.1

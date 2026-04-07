@@ -91,11 +91,12 @@ func (s PSQLRepo) SaveTranscription(ctx context.Context, m *model.Transcription)
 }
 
 func (s PSQLRepo) SearchTranscriptions(ctx context.Context, wordList []string) ([]model.TranscriptionListItem, error) {
-	req := "SELECT id, ts, (SELECT user_name FROM public.users u WHERE u.id = m.user_id) as user_name FROM public.transcriptions m WHERE data ~ '$1';"
+	req := `SELECT id, ts, (SELECT user_name FROM public.users u WHERE u.id = m.user_id) as user_name FROM public.transcriptions m WHERE m.data ~ $1;`
 	ctxSelect, cancelSelect := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelSelect()
 
-	rawData, errDB := s.db.SelectRows(ctxSelect, req, strings.Join(wordList, "|"))
+	argWL := strings.Join(wordList, "|")
+	rawData, errDB := s.db.SelectRows(ctxSelect, req, argWL)
 	if errDB != nil {
 		return nil, errDB
 	}

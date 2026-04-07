@@ -45,6 +45,7 @@ func (tb *TeleBot) ProcessText(ctx context.Context, msg tele.Context) error {
 		case "/get":
 			return tb.CmdGet(msg)
 		case "/find":
+			return tb.CmdFind(msg)
 		case "/chat":
 		default:
 			tb.outChan <- Response{MsgCtx: msg, Data: fmt.Sprintf("Команда %q не поддерживается", msg.Text())}
@@ -114,7 +115,7 @@ func (tb *TeleBot) CmdFind(ctx tele.Context) error {
 		wordCount = 1
 	}
 
-	var wordList = make([]string, wordCount)
+	var wordList []string
 	for _, w := range strings.Split(ctx.Message().Payload, ",") {
 		wordList = append(wordList, strings.TrimSpace(w))
 	}
