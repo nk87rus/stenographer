@@ -3,11 +3,13 @@ package psql
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	psqldrv "github.com/nk87rus/transcriptor/internal/db/psql"
 	"github.com/nk87rus/transcriptor/internal/model"
 )
@@ -46,6 +48,11 @@ func (s *PSQLRepo) RegisterUser(ctx context.Context, userID int64, userName stri
 	ctxInsert, cancelInsert := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelInsert()
 	if err := s.db.Insert(ctxInsert, req, userID, userName); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			fmt.Println("Обработана ошибка: Нарушение уникальности (duplicate key)")
+			return fmt.Errorf("🤝 В повторной регистрации нет необходимости, Вы уже зарегистрированы.")
+		}
 		return fmt.Errorf("RegisterUser: %w", err)
 	}
 	return nil
@@ -75,6 +82,9 @@ func (s *PSQLRepo) GetTranscription(ctx context.Context, mID int64) (*model.Tran
 		return nil, errDB
 	}
 	result, err := pgx.CollectOneRow(rawData, pgx.RowToStructByName[model.Transcription])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
 	return &result, err
 }
 

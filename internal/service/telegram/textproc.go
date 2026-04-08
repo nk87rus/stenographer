@@ -57,7 +57,6 @@ func (tb *TeleBot) ProcessText(ctx context.Context, msg tele.Context) error {
 }
 
 func (tb *TeleBot) CmdStart(ctx tele.Context) error {
-	// TODO: добавить обработку ошибки при попытке повторной регистрации пользователя
 	if errHdlr := tb.hdlr.RegisterUser(tb.ctx, ctx.Sender().ID, ctx.Sender().Username); errHdlr != nil {
 		return errHdlr
 	}
@@ -93,7 +92,7 @@ func (tb *TeleBot) CmdList(ctx tele.Context) error {
 func (tb *TeleBot) CmdGet(ctx tele.Context) error {
 	tcrID, errID := strconv.ParseInt(ctx.Message().Payload, 10, 64)
 	if errID != nil {
-		return fmt.Errorf("не корректный формат идентификатора встречи")
+		return fmt.Errorf("не корректный формат идентификатора транскрипции")
 	}
 
 	data, errHdlr := tb.hdlr.GetTranscription(tb.ctx, tcrID)
@@ -102,11 +101,14 @@ func (tb *TeleBot) CmdGet(ctx tele.Context) error {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "📝 Транскрипция встречи %d от %s\n", data.Id, time.Unix(data.TimeStamp, 0).String())
-	fmt.Fprintf(&sb, "Автор: %s\n", data.Author)
-	sb.WriteString(strings.Repeat("-", 15) + "\n")
-	sb.WriteString(data.Data)
-
+	if data != nil {
+		fmt.Fprintf(&sb, "📝 Транскрипция встречи %d от %s\n", data.Id, time.Unix(data.TimeStamp, 0).String())
+		fmt.Fprintf(&sb, "Автор: %s\n", data.Author)
+		sb.WriteString(strings.Repeat("-", 15) + "\n")
+		sb.WriteString(data.Data)
+	} else {
+		fmt.Fprintf(&sb, "❗️транскрипция с идентификатором %d не найдена.", tcrID)
+	}
 	tb.outChan <- Response{MsgCtx: ctx, Data: sb.String()}
 	return nil
 }
@@ -129,7 +131,7 @@ func (tb *TeleBot) CmdFind(ctx tele.Context) error {
 
 	var resp = Response{MsgCtx: ctx}
 	if len(data) == 0 {
-		resp.Data = "не найдено ни одной встречи по ключевым словам: " + ctx.Message().Payload
+		resp.Data = fmt.Sprintf("не найдено ни одной встречи по ключевым словам: %v", wordList)
 	} else {
 		var sb strings.Builder
 		for i, m := range data {
