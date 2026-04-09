@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"iter"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -103,7 +103,7 @@ type (
 	}
 )
 
-func (s *SaluteSpeechClient) Recognize(ctx context.Context, srcFile *model.AudioFile) ([]string, error) {
+func (s *SaluteSpeechClient) Recognize(ctx context.Context, srcFile *model.AudioFile) iter.Seq2[string, error] {
 	reqID := uuid.NewString()
 	log.Info().Str("service", "salutespeech").Str("id", reqID).Msgf("начало процедуры распознавания речи для %q", srcFile.LocalFilePath)
 	defer log.Info().Str("service", "salutespeech").Str("id", reqID).Msgf("завершение процедуры распознавания речи для %q", srcFile.LocalFilePath)
@@ -111,13 +111,17 @@ func (s *SaluteSpeechClient) Recognize(ctx context.Context, srcFile *model.Audio
 	log.Debug().Str("service", "salutespeech").Str("id", reqID).Str("fileName", srcFile.LocalFilePath).Msg("загрузка файла на сервер")
 	fileID, errUpload := s.uploadFile(ctx, reqID, srcFile)
 	if errUpload != nil {
-		return nil, errUpload
+		return func(yield func(string, error) bool) {
+			yield("", errUpload)
+		}
 	}
 
 	log.Debug().Str("service", "salutespeech").Str("id", reqID).Str("uploadedFileID", fileID).Msg("создание задачи на распознавание текста")
 	taskID, errCreateTask := s.createTask(ctx, reqID, fileID, srcFile.Encoding)
 	if errCreateTask != nil {
-		return nil, errCreateTask
+		return func(yield func(string, error) bool) {
+			yield("", errCreateTask)
+		}
 	}
 
 	var rFileID string
@@ -126,7 +130,9 @@ polling:
 		log.Debug().Str("service", "salutespeech").Str("id", reqID).Str("taskID", taskID).Msg("запрос статуса задачи")
 		taskState, errPoll := s.pollTask(ctx, taskID)
 		if errPoll != nil {
-			return nil, errPoll
+			return func(yield func(string, error) bool) {
+				yield("", errPoll)
+			}
 		}
 		log.Debug().Str("service", "salutespeech").Str("id", reqID).Str("taskID", taskID).Str("state", taskState.Result.Status).Msg("получен статус задачи")
 		switch taskState.Result.Status {
@@ -134,21 +140,20 @@ polling:
 			rFileID = taskState.Result.RespFileID
 			break polling
 		case "ERROR":
-			return nil, fmt.Errorf("распознание текста завершилось ошибкой")
+			return func(yield func(string, error) bool) {
+				yield("", fmt.Errorf("распознание текста завершилось ошибкой"))
+			}
 		case "CANCELED":
-			return nil, fmt.Errorf("распознание текста отменено")
+			return func(yield func(string, error) bool) {
+				yield("", fmt.Errorf("распознание текста отменено"))
+			}
 		default:
 			time.Sleep(3 * time.Second)
 		}
 	}
 
 	log.Debug().Str("service", "salutespeech").Str("id", reqID).Str("resultFileID", rFileID).Msg("получение результата распознавания текста")
-	result, errFetchResult := s.fetchResult(ctx, rFileID)
-	if errFetchResult != nil {
-		return nil, errFetchResult
-	}
-
-	return result, nil
+	return s.fetchResult(ctx, rFileID)
 }
 
 func (s *SaluteSpeechClient) uploadFile(ctx context.Context, reqID string, file *model.AudioFile) (string, error) {
@@ -264,10 +269,12 @@ func (s *SaluteSpeechClient) pollTask(ctx context.Context, taskID string) (*Task
 	return &result, nil
 }
 
-func (s *SaluteSpeechClient) fetchResult(ctx context.Context, fileID string) ([]string, error) {
+func (s *SaluteSpeechClient) fetchResult(ctx context.Context, fileID string) iter.Seq2[string, error] {
 	token, errToken := s.token.Get(ctx)
 	if errToken != nil {
-		return nil, errToken
+		return func(yield func(string, error) bool) {
+			yield("", errToken)
+		}
 	}
 
 	client := resty.New().
@@ -282,33 +289,39 @@ func (s *SaluteSpeechClient) fetchResult(ctx context.Context, fileID string) ([]
 		Get(fetchResultURI)
 
 	if err != nil {
-		return nil, err
-	}
-	defer resp.RawBody().Close()
-
-	if resp.StatusCode() != 200 {
-		return nil, fmt.Errorf("%s", resp.String())
-	}
-
-	return parseResults(resp.RawBody())
-}
-
-func parseResults(rawData io.Reader) ([]string, error) {
-	var data []RecognizeResult
-	if err := json.NewDecoder(rawData).Decode(&data); err != nil {
-		return nil, err
-	}
-
-	var result = make([]string, 0, len(data))
-	for _, r := range data {
-		var imdtResults = make([]string, 0, len(r.Results))
-		for _, ri := range r.Results {
-			if ri.NormText != "" {
-				imdtResults = append(imdtResults, ri.NormText)
-			}
-			result = append(result, strings.Join(imdtResults, " "))
+		return func(yield func(string, error) bool) {
+			yield("", err)
 		}
 	}
 
-	return result, nil
+	if resp.StatusCode() != 200 {
+		return func(yield func(string, error) bool) {
+			yield("", fmt.Errorf("%s", resp.String()))
+			resp.RawBody().Close()
+		}
+	}
+
+	return parseResults(resp.RawBody(), resp.RawBody().Close)
+}
+
+func parseResults(rawData io.Reader, finalCallback func() error) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		var data []RecognizeResult
+		if errDecode := json.NewDecoder(rawData).Decode(&data); errDecode != nil {
+			yield("", errDecode)
+			finalCallback()
+			return
+		}
+
+		for _, r := range data {
+			for _, ri := range r.Results {
+				if ri.NormText != "" {
+					if !yield(ri.NormText, nil) {
+						finalCallback()
+						return
+					}
+				}
+			}
+		}
+	}
 }

@@ -22,3 +22,7 @@ type TranscriptionListItem struct {
 func (tli TranscriptionListItem) String() string {
 	return fmt.Sprintf("Транскрипция встречи: %d Время: %s Автор: %s", tli.Id, time.Unix(tli.TimeStamp, 0).String(), tli.Author)
 }
+
+func (tr *Transcription) IsEmpty() bool {
+	return *tr == Transcription{}
+}

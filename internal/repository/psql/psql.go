@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"strings"
 	"time"
 
@@ -43,33 +44,57 @@ func NewPSQLRepo(ctx context.Context, dsn string) (*PSQLRepo, error) {
 	return &PSQLRepo{db: dbDrv}, nil
 }
 
-func (s *PSQLRepo) RegisterUser(ctx context.Context, userID int64, userName string) error {
+func rowsToSeq[T any](rows *pgx.Rows) iter.Seq2[T, error] {
+	return func(yield func(T, error) bool) {
+		if rows == nil {
+			return
+		}
+		defer (*rows).Close()
+
+		for (*rows).Next() {
+			val, err := pgx.RowToStructByName[T](*rows)
+			if !yield(val, err) {
+				return
+			}
+		}
+
+		if err := (*rows).Err(); err != nil {
+			var zero T
+			yield(zero, err)
+		}
+	}
+}
+
+func (s *PSQLRepo) RegisterUser(ctx context.Context, userID int64, userName string) *model.DBResponse {
 	req := `INSERT INTO public.users(id, user_name) VALUES ($1, $2);`
 	ctxInsert, cancelInsert := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelInsert()
+
+	result := model.DBResponse{Data: "Пользователь успешно зарегистрирован"}
 	if err := s.db.Insert(ctxInsert, req, userID, userName); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			fmt.Println("Обработана ошибка: Нарушение уникальности (duplicate key)")
-			return fmt.Errorf("🤝 В повторной регистрации нет необходимости, Вы уже зарегистрированы.")
+			result.Data = "Пользователь уже зарегистрирован"
+		} else {
+			result.Err = fmt.Errorf("ошибка при регистрации нового пользователя: %w", err)
 		}
-		return fmt.Errorf("RegisterUser: %w", err)
 	}
-	return nil
+	return &result
 }
 
-func (s *PSQLRepo) GetTranscriptionsList(ctx context.Context) ([]model.TranscriptionListItem, error) {
+func (s *PSQLRepo) GetTranscriptionsList(ctx context.Context) iter.Seq2[model.TranscriptionListItem, error] {
 	req := "SELECT id, ts, (SELECT user_name FROM public.users u WHERE u.id = m.user_id) as user_name FROM public.transcriptions m"
 	ctxSelect, cancelSelect := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelSelect()
 
 	rawData, errDB := s.db.SelectRows(ctxSelect, req)
 	if errDB != nil {
-		return nil, errDB
+		return func(yield func(model.TranscriptionListItem, error) bool) {
+			yield(model.TranscriptionListItem{}, errDB)
+		}
 	}
 
-	return pgx.CollectRows(rawData, pgx.RowToStructByName[model.TranscriptionListItem])
-
+	return rowsToSeq[model.TranscriptionListItem](&rawData)
 }
 
 func (s *PSQLRepo) GetTranscription(ctx context.Context, mID int64) (*model.Transcription, error) {
@@ -83,7 +108,7 @@ func (s *PSQLRepo) GetTranscription(ctx context.Context, mID int64) (*model.Tran
 	}
 	result, err := pgx.CollectOneRow(rawData, pgx.RowToStructByName[model.Transcription])
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+		return &model.Transcription{}, nil
 	}
 	return &result, err
 }
@@ -100,7 +125,7 @@ func (s PSQLRepo) SaveTranscription(ctx context.Context, m *model.Transcription)
 
 }
 
-func (s PSQLRepo) SearchTranscriptions(ctx context.Context, wordList []string) ([]model.TranscriptionListItem, error) {
+func (s PSQLRepo) SearchTranscriptions(ctx context.Context, wordList []string) iter.Seq2[model.TranscriptionListItem, error] {
 	req := `SELECT id, ts, (SELECT user_name FROM public.users u WHERE u.id = m.user_id) as user_name FROM public.transcriptions m WHERE m.data ~ $1;`
 	ctxSelect, cancelSelect := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelSelect()
@@ -108,8 +133,10 @@ func (s PSQLRepo) SearchTranscriptions(ctx context.Context, wordList []string) (
 	argWL := strings.Join(wordList, "|")
 	rawData, errDB := s.db.SelectRows(ctxSelect, req, argWL)
 	if errDB != nil {
-		return nil, errDB
+		return func(yield func(model.TranscriptionListItem, error) bool) {
+			yield(model.TranscriptionListItem{}, errDB)
+		}
 	}
 
-	return pgx.CollectRows(rawData, pgx.RowToStructByName[model.TranscriptionListItem])
+	return rowsToSeq[model.TranscriptionListItem](&rawData)
 }

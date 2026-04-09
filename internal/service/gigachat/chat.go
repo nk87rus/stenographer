@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"strings"
+	"iter"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
@@ -74,7 +74,7 @@ type (
 	}
 )
 
-func (g *GigaChatClient) Chat(ctx context.Context, request string) (string, error) {
+func (g *GigaChatClient) Chat(ctx context.Context, request string) iter.Seq2[string, error] {
 	reqID := uuid.NewString()
 	log.Info().Str("service", "gigachat").Str("id", reqID).Msg("начало обработки запроса пользователя")
 	defer log.Info().Str("service", "gigachat").Str("id", reqID).Msg("завершение обработки запроса пользователя")
@@ -88,7 +88,9 @@ func (g *GigaChatClient) Chat(ctx context.Context, request string) (string, erro
 
 	token, errToken := g.token.Get(ctx)
 	if errToken != nil {
-		return "", errToken
+		return func(yield func(string, error) bool) {
+			yield("", errToken)
+		}
 	}
 
 	var result ChatResponse
@@ -104,25 +106,28 @@ func (g *GigaChatClient) Chat(ctx context.Context, request string) (string, erro
 		Post(chatURI)
 
 	if err != nil {
-		return "", err
+		return func(yield func(string, error) bool) {
+			yield("", errToken)
+		}
 	}
 
 	if resp.StatusCode() != 200 {
-		return "", fmt.Errorf("%s", resp.String())
+		return func(yield func(string, error) bool) {
+			yield("", fmt.Errorf("%s", resp.String()))
+		}
 	}
 
 	return parseChatResponse(&result)
 }
 
-func parseChatResponse(data *ChatResponse) (string, error) {
-	var result strings.Builder
-	for _, c := range data.Choices {
-		if c.Message.Content != "" {
-			if _, err := result.WriteString(c.Message.Content); err != nil {
-				return "", fmt.Errorf("ошибка при обработке резуотатов ответа GigaChat: %w", err)
+func parseChatResponse(data *ChatResponse) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		for _, c := range data.Choices {
+			if c.Message.Content != "" {
+				if !yield(c.Message.Content, nil) {
+					return
+				}
 			}
 		}
 	}
-
-	return result.String(), nil
 }

@@ -2,24 +2,25 @@ package handler
 
 import (
 	"context"
+	"iter"
 
 	"github.com/nk87rus/transcriptor/internal/model"
 )
 
 type RepoMgr interface {
-	RegisterUser(ctx context.Context, userID int64, userName string) error
-	GetTranscriptionsList(ctx context.Context) ([]model.TranscriptionListItem, error)
+	RegisterUser(ctx context.Context, userID int64, userName string) *model.DBResponse
+	GetTranscriptionsList(ctx context.Context) iter.Seq2[model.TranscriptionListItem, error]
 	GetTranscription(ctx context.Context, mID int64) (*model.Transcription, error)
 	SaveTranscription(ctx context.Context, m *model.Transcription) error
-	SearchTranscriptions(ctx context.Context, wordList []string) ([]model.TranscriptionListItem, error)
+	SearchTranscriptions(ctx context.Context, wordList []string) iter.Seq2[model.TranscriptionListItem, error]
 }
 
 type SpeechRecognizer interface {
-	Recognize(ctx context.Context, srcFile *model.AudioFile) ([]string, error)
+	Recognize(ctx context.Context, srcFile *model.AudioFile) iter.Seq2[string, error]
 }
 
 type AIChat interface {
-	Chat(ctx context.Context, request string) (string, error)
+	Chat(ctx context.Context, request string) iter.Seq2[string, error]
 }
 
 type Handler struct {
@@ -32,11 +33,11 @@ func Init(storage RepoMgr, sr SpeechRecognizer, aiChat AIChat) *Handler {
 	return &Handler{repo: storage, sr: sr, aiChat: aiChat}
 }
 
-func (h *Handler) RegisterUser(ctx context.Context, userID int64, userName string) error {
+func (h *Handler) RegisterUser(ctx context.Context, userID int64, userName string) *model.DBResponse {
 	return h.repo.RegisterUser(ctx, userID, userName)
 }
 
-func (h *Handler) GetTranscriptionsList(ctx context.Context) ([]model.TranscriptionListItem, error) {
+func (h *Handler) GetTranscriptionsList(ctx context.Context) iter.Seq2[model.TranscriptionListItem, error] {
 	return h.repo.GetTranscriptionsList(ctx)
 }
 
@@ -44,7 +45,7 @@ func (h *Handler) GetTranscription(ctx context.Context, mID int64) (*model.Trans
 	return h.repo.GetTranscription(ctx, mID)
 }
 
-func (h *Handler) SearchTranscriptions(ctx context.Context, wordList []string) ([]model.TranscriptionListItem, error) {
+func (h *Handler) SearchTranscriptions(ctx context.Context, wordList []string) iter.Seq2[model.TranscriptionListItem, error] {
 	return h.repo.SearchTranscriptions(ctx, wordList)
 }
 
@@ -52,14 +53,14 @@ func (h *Handler) SaveTranscription(ctx context.Context, m *model.Transcription)
 	return h.repo.SaveTranscription(ctx, m)
 }
 
-func (h *Handler) RecognizeAudio(ctx context.Context, srcFile *model.AudioFile) ([]string, error) {
+func (h *Handler) RecognizeAudio(ctx context.Context, srcFile *model.AudioFile) iter.Seq2[string, error] {
 	return h.sr.Recognize(ctx, srcFile)
 }
 
-func (h *Handler) RecognizeVoice(ctx context.Context, srcFile *model.AudioFile) ([]string, error) {
+func (h *Handler) RecognizeVoice(ctx context.Context, srcFile *model.AudioFile) iter.Seq2[string, error] {
 	return h.sr.Recognize(ctx, srcFile)
 }
 
-func (h *Handler) AIChat(ctx context.Context, request string) (string, error) {
+func (h *Handler) AIChat(ctx context.Context, request string) iter.Seq2[string, error] {
 	return h.aiChat.Chat(ctx, request)
 }
