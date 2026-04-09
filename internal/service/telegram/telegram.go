@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -14,7 +15,10 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-const procsCount = 2
+const (
+	procsCount   = 2
+	chunkTimeout = 500 * time.Millisecond
+)
 
 type Handler interface {
 	TextHandler
@@ -40,11 +44,10 @@ type Response struct {
 }
 
 type TeleBot struct {
-	bot     *tele.Bot
-	hdlr    Handler
-	ctx     context.Context
-	inChan  chan Message
-	outChan chan Response
+	bot    *tele.Bot
+	hdlr   Handler
+	ctx    context.Context
+	inChan chan Message
 }
 
 func InitBot(ctx context.Context, token string, hdlr Handler) (*TeleBot, error) {
@@ -74,10 +77,9 @@ func InitBot(ctx context.Context, token string, hdlr Handler) (*TeleBot, error) 
 	// b.Use(middleware.Logger())
 
 	newTB := TeleBot{
-		bot:     b,
-		hdlr:    hdlr,
-		inChan:  make(chan Message, 100),
-		outChan: make(chan Response, 100),
+		bot:    b,
+		hdlr:   hdlr,
+		inChan: make(chan Message, 100),
 	}
 
 	newTB.bot.Handle(tele.OnText, newTB.OnText)
@@ -99,7 +101,7 @@ func (tb *TeleBot) Run(ctx context.Context) error {
 
 	for i := range procsCount {
 		go tb.Processor(ctx, i)
-		go tb.Sender(ctx, i)
+		// go tb.Sender(ctx, i)
 	}
 
 	tb.bot.Start()
@@ -108,20 +110,42 @@ func (tb *TeleBot) Run(ctx context.Context) error {
 	return nil
 }
 
-func (tb *TeleBot) Sender(ctx context.Context, senderID int) error {
-	log.Debug().Int("senderID", senderID).Msg("запуск отправителя")
+func (tb *TeleBot) Sender(ctx tele.Context, dataChan <-chan string) error {
+	log.Debug().Int("userID", int(ctx.Sender().ID)).Msgf("начало отправки ответа пользователю %s", ctx.Sender().Username)
+	defer log.Debug().Int("userID", int(ctx.Sender().ID)).Msgf("отправка ответа пользователю %s завершена", ctx.Sender().Username)
+
+	msg, err := ctx.Bot().Send(ctx.Chat(), "⏳ Генерирую ответ...")
+	if err != nil {
+		return err
+	}
+
+	var fullResponse strings.Builder
+	lastUpdate := time.Now()
+	chunkNum := 0
 	for {
 		select {
-		case <-ctx.Done():
-			log.Debug().Int("senderID", senderID).Msg("получен сигнал остановки. завершение работы отправителя")
-			return ctx.Err()
-		case resp := <-tb.outChan:
-			log.Debug().Int("senderID", senderID).Int("MsgID", resp.MsgCtx.Message().ID).Msg("получен ответ на сообщение")
-			if errSend := resp.MsgCtx.Send(resp.Data); errSend != nil {
-				log.Error().Int("senderID", senderID).Int("MsgID", resp.MsgCtx.Message().ID).Err(errSend)
-				return errSend
+		case <-tb.ctx.Done():
+			log.Debug().Str("reporter", "Sender").Str("username", ctx.Chat().Username).Msg("получен сигнал остановки. завершение работы отправки")
+			return tb.ctx.Err()
+		case chunk, ok := <-dataChan:
+			if !ok {
+				return nil
 			}
-			log.Debug().Int("senderID", senderID).Int("MsgID", resp.MsgCtx.Message().ID).Msg("ответ успешно отправлен")
+			chunkNum++
+			log.Debug().Str("reporter", "Sender").Str("username", ctx.Chat().Username).Int("chunkNum", chunkNum).Msg("отправка очередной части сообщения")
+
+			fullResponse.WriteString(chunk)
+			if chunkNum > 1 && time.Since(lastUpdate) < chunkTimeout {
+				waitingTime := time.Until(lastUpdate.Add(chunkTimeout))
+				time.After(waitingTime)
+				log.Debug().Str("reporter", "Sender").Str("username", ctx.Chat().Username).Int("chunkNum", chunkNum).Str("timeout", waitingTime.String()).Msg("пауза перед отправкой очередной части сообщения")
+			}
+
+			if _, err := ctx.Bot().Edit(msg, fullResponse.String()); err != nil {
+				log.Err(err).Str("chunk", chunk).Str("username", ctx.Chat().Username).Int("chunkNum", chunkNum).Msg("Ошибка при дополнении сообщения")
+				return err
+			}
+			lastUpdate = time.Now()
 		}
 	}
 }
@@ -141,13 +165,13 @@ func (tb *TeleBot) Processor(ctx context.Context, procID int) {
 			switch msg.MsgType {
 			case MsgText:
 				if err := tb.ProcessText(ctx, msg.MsgCtx); err != nil {
-					log.Error().Int("prcoID", procID).Err(err).Int("MsgID", msg.MsgCtx.Message().ID).Msg("ошибка при обработки сообщения")
-					tb.outChan <- Response{MsgCtx: msg.MsgCtx, Data: fmt.Sprintf("ошибка: %v", err.Error())}
+					log.Error().Int("prcoID", procID).Err(err).Int("MsgID", msg.MsgCtx.Message().ID).Msg("ошибка при обработке сообщения")
+					msg.MsgCtx.Send(fmt.Sprintf("ошибка: %v", err.Error()))
 				}
 			case MsgAudio, MsgVoice:
 				if err := tb.ProcessAudio(ctx, msg); err != nil {
-					log.Error().Int("prcoID", procID).Err(err).Int("MsgID", msg.MsgCtx.Message().ID).Msg("ошибка при обработки сообщения")
-					tb.outChan <- Response{MsgCtx: msg.MsgCtx, Data: fmt.Sprintf("ошибка: %v", err.Error())}
+					log.Error().Int("prcoID", procID).Err(err).Int("MsgID", msg.MsgCtx.Message().ID).Msg("ошибка при обработке сообщения")
+					msg.MsgCtx.Send(fmt.Sprintf("ошибка: %v", err.Error()))
 				}
 			}
 		}

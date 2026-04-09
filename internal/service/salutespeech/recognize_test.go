@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/nk87rus/transcriptor/internal/model"
@@ -26,12 +25,13 @@ func TestRecognize(t *testing.T) {
 	}
 
 	s := SaluteSpeechClient{token: sbertoken.NewTokenManager(testAuthKey, scope)}
-	resultDataFile, resultError := s.Recognize(t.Context(), &af)
-	if resultError != nil {
-		t.Fatal(resultError)
-	}
+	for resultDataFile, resultError := range s.Recognize(t.Context(), &af) {
+		if resultError != nil {
+			t.Fatal(resultError)
+		}
 
-	println("---\n", strings.Join(resultDataFile, " "))
+		println(resultDataFile)
+	}
 }
 
 const (
@@ -65,12 +65,13 @@ func TestPolltask(t *testing.T) {
 
 func TestFetchResult(t *testing.T) {
 	s := SaluteSpeechClient{token: sbertoken.NewTokenManager(testAuthKey, scope)}
-	resultData, resultError := s.fetchResult(t.Context(), respFileID)
-	if resultError != nil {
-		t.Fatal(resultError)
-	}
+	for resultData, resultError := range s.fetchResult(t.Context(), respFileID) {
+		if resultError != nil {
+			t.Fatal(resultError)
+		}
 
-	fmt.Printf("%+v\n", resultData)
+		fmt.Printf("%+v\n", resultData)
+	}
 }
 
 func TestParseResults(t *testing.T) {
@@ -81,10 +82,11 @@ func TestParseResults(t *testing.T) {
 	defer f.Close()
 
 	fr := bufio.NewReader(f)
-	resultData, resultError := parseResults(fr)
-	if resultError != nil {
-		t.Fatal(resultData)
-	}
+	for resultData, resultError := range parseResults(fr, func() error { return nil }) {
+		if resultError != nil {
+			t.Fatal(resultData)
+		}
 
-	fmt.Printf("resList: %+v\n\nconc: %s", resultData, strings.Join(resultData, " "))
+		fmt.Printf("res: %+v\n", resultData)
+	}
 }

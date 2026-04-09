@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"iter"
 	"regexp"
 	"strconv"
 	"strings"
@@ -10,17 +11,18 @@ import (
 
 	"github.com/nk87rus/transcriptor/internal/model"
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sync/errgroup"
 	tele "gopkg.in/telebot.v3"
 )
 
-var reCmd = regexp.MustCompile(`^\/(start|get|list|find|chat)`)
+var reCmd = regexp.MustCompile(`^\/(start|get|list|find|chat|help)`)
 
 type TextHandler interface {
-	RegisterUser(ctx context.Context, userID int64, userName string) error
-	GetTranscriptionsList(ctx context.Context) ([]model.TranscriptionListItem, error)
+	RegisterUser(ctx context.Context, userID int64, userName string) *model.DBResponse
+	GetTranscriptionsList(ctx context.Context) iter.Seq2[model.TranscriptionListItem, error]
 	GetTranscription(ctx context.Context, mID int64) (*model.Transcription, error)
-	SearchTranscriptions(ctx context.Context, wordList []string) ([]model.TranscriptionListItem, error)
-	AIChat(ctx context.Context, request string) (string, error)
+	SearchTranscriptions(ctx context.Context, wordList []string) iter.Seq2[model.TranscriptionListItem, error]
+	AIChat(ctx context.Context, request string) iter.Seq2[string, error]
 }
 
 func (tb *TeleBot) OnText(ctx tele.Context) error {
@@ -49,51 +51,46 @@ func (tb *TeleBot) ProcessText(ctx context.Context, msg tele.Context) error {
 			return tb.CmdFind(msg)
 		case "/chat":
 			return tb.CmdChat(msg)
+		case "/help":
+			return tb.CmdHelp(msg)
 		default:
-			tb.outChan <- Response{MsgCtx: msg, Data: fmt.Sprintf("Команда %q не поддерживается", msg.Text())}
+			msg.Send(fmt.Sprintf("Команда %q не поддерживается", msg.Text()))
 		}
 	}
 	return nil
 }
 
 func (tb *TeleBot) CmdStart(ctx tele.Context) error {
-	// TODO: добавить обработку ошибки при попытке повторной регистрации пользователя
-	if errHdlr := tb.hdlr.RegisterUser(tb.ctx, ctx.Sender().ID, ctx.Sender().Username); errHdlr != nil {
-		return errHdlr
+	dbResp := tb.hdlr.RegisterUser(tb.ctx, ctx.Sender().ID, ctx.Sender().Username)
+	if dbResp.Err != nil {
+		return dbResp.Err
 	}
-
-	tb.outChan <- Response{MsgCtx: ctx, Data: fmt.Sprintf("Пользователь %q успешно зарегистрирован", ctx.Sender().Username)}
-	return nil
+	return ctx.Send(dbResp.Data)
 }
 
 func (tb *TeleBot) CmdList(ctx tele.Context) error {
-	data, errHdlr := tb.hdlr.GetTranscriptionsList(tb.ctx)
-	if errHdlr != nil {
-		return errHdlr
-	}
+	var dataChan = make(chan string)
 
-	var resp = Response{MsgCtx: ctx}
-	if len(data) == 0 {
-		resp.Data = "не найдено ни одной сохранённой встречи"
-	} else {
-		var sb strings.Builder
-		for i, m := range data {
-			sb.WriteString("📝 ")
-			sb.WriteString(m.String())
-			if i != len(data) {
-				sb.WriteString("\n")
-			}
+	eg := new(errgroup.Group)
+	eg.Go(func() error {
+		return tb.Sender(ctx, dataChan)
+	})
+
+	for data, errHdlr := range tb.hdlr.GetTranscriptionsList(tb.ctx) {
+		if errHdlr != nil {
+			close(dataChan)
+			return errHdlr
 		}
-		resp.Data = sb.String()
+		dataChan <- fmt.Sprintf("📝 %s\n", data.String())
 	}
+	close(dataChan)
 
-	tb.outChan <- resp
-	return nil
+	return eg.Wait()
 }
 func (tb *TeleBot) CmdGet(ctx tele.Context) error {
 	tcrID, errID := strconv.ParseInt(ctx.Message().Payload, 10, 64)
 	if errID != nil {
-		return fmt.Errorf("не корректный формат идентификатора встречи")
+		return fmt.Errorf("не корректный формат идентификатора транскрипции")
 	}
 
 	data, errHdlr := tb.hdlr.GetTranscription(tb.ctx, tcrID)
@@ -101,49 +98,52 @@ func (tb *TeleBot) CmdGet(ctx tele.Context) error {
 		return errHdlr
 	}
 
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "📝 Транскрипция встречи %d от %s\n", data.Id, time.Unix(data.TimeStamp, 0).String())
-	fmt.Fprintf(&sb, "Автор: %s\n", data.Author)
-	sb.WriteString(strings.Repeat("-", 15) + "\n")
-	sb.WriteString(data.Data)
+	var dataChan = make(chan string)
 
-	tb.outChan <- Response{MsgCtx: ctx, Data: sb.String()}
-	return nil
+	eg := new(errgroup.Group)
+	eg.Go(func() error {
+		return tb.Sender(ctx, dataChan)
+	})
+
+	if !data.IsEmpty() {
+		dataChan <- fmt.Sprintf("📝 Транскрипция встречи %d от %s\n", data.Id, time.Unix(data.TimeStamp, 0).String())
+		dataChan <- fmt.Sprintf("Автор: %s\n", data.Author)
+		dataChan <- strings.Repeat("-", 15) + "\n"
+		dataChan <- data.Data
+	} else {
+		dataChan <- fmt.Sprintf("❗️транскрипция с идентификатором %d не найдена.", tcrID)
+	}
+
+	return eg.Wait()
 }
 
 func (tb *TeleBot) CmdFind(ctx tele.Context) error {
-	wordCount := strings.Count(ctx.Message().Payload, ",")
-	if wordCount == 0 {
-		wordCount = 1
-	}
-
 	var wordList []string
 	for w := range strings.SplitSeq(ctx.Message().Payload, ",") {
 		wordList = append(wordList, strings.TrimSpace(w))
 	}
 
-	data, errHdlr := tb.hdlr.SearchTranscriptions(tb.ctx, wordList)
-	if errHdlr != nil {
-		return errHdlr
-	}
+	var dataChan = make(chan string)
+	eg := new(errgroup.Group)
+	eg.Go(func() error {
+		return tb.Sender(ctx, dataChan)
+	})
 
-	var resp = Response{MsgCtx: ctx}
-	if len(data) == 0 {
-		resp.Data = "не найдено ни одной встречи по ключевым словам: " + ctx.Message().Payload
-	} else {
-		var sb strings.Builder
-		for i, m := range data {
-			sb.WriteString("📝 ")
-			sb.WriteString(m.String())
-			if i != len(data) {
-				sb.WriteString("\n")
-			}
+	resCount := 0
+	for data, errHdlr := range tb.hdlr.SearchTranscriptions(tb.ctx, wordList) {
+		if errHdlr != nil {
+			close(dataChan)
+			return errHdlr
 		}
-		resp.Data = sb.String()
+		resCount++
+		dataChan <- fmt.Sprintf("📝 %s\n", data.String())
 	}
+	if resCount == 0 {
+		dataChan <- fmt.Sprintf("не найдено ни одной встречи по ключевым словам: %v", wordList)
+	}
+	close(dataChan)
 
-	tb.outChan <- resp
-	return nil
+	return eg.Wait()
 }
 
 func (tb *TeleBot) CmdChat(ctx tele.Context) error {
@@ -151,12 +151,45 @@ func (tb *TeleBot) CmdChat(ctx tele.Context) error {
 		return fmt.Errorf("не найден текст запроса")
 	}
 
-	result, errHdlr := tb.hdlr.AIChat(tb.ctx, ctx.Message().Payload)
-	if errHdlr != nil {
-		return errHdlr
+	var dataChan = make(chan string)
+	eg := new(errgroup.Group)
+	eg.Go(func() error {
+		return tb.Sender(ctx, dataChan)
+	})
+
+	for result, errHdlr := range tb.hdlr.AIChat(tb.ctx, ctx.Message().Payload) {
+		if errHdlr != nil {
+			close(dataChan)
+			return errHdlr
+		}
+		dataChan <- result
+	}
+	close(dataChan)
+
+	return eg.Wait()
+}
+
+func (tb *TeleBot) CmdHelp(ctx tele.Context) error {
+	var dataChan = make(chan string)
+
+	eg := new(errgroup.Group)
+	eg.Go(func() error {
+		return tb.Sender(ctx, dataChan)
+	})
+
+	data := []string{
+		"❓ Допустимые команды:",
+		"/start – регистрация пользователя",
+		"/list  – список сохраненных встреч",
+		"/get   - получение текста встречи (например: /get 1234)",
+		"/find  – поиск встречи по ключевым словам (например: /find ну, так, рыба)",
+		"/chat  – запрос к GigaChat",
 	}
 
-	tb.outChan <- Response{MsgCtx: ctx, Data: result}
+	for _, line := range data {
+		dataChan <- "•" + line + "\n"
+	}
+	close(dataChan)
 
-	return nil
+	return eg.Wait()
 }

@@ -13,11 +13,12 @@ func TestChat(t *testing.T) {
 		t.Fatal(ge)
 	}
 
-	resultData, resultError := g.Chat(t.Context(), "что такое свет?")
-	if resultError != nil {
-		t.Fatal(resultError)
-	}
+	for resultData, resultError := range g.Chat(t.Context(), "что такое свет?") {
+		if resultError != nil {
+			t.Fatal(resultError)
+		}
 
-	fmt.Printf("---\n%s\n---", resultData)
+		fmt.Printf("%s\n", resultData)
+	}
 
 }
